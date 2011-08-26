@@ -281,6 +281,21 @@ module Mongoid
         Caption.find_by_slug(caption.to_param).should eql caption
       end
     end
+    
+    context "when :slug is given a block and no slug fields are defined" do
+      let(:dynamic_flexible) { DynamicFlexible.create(:title => "dynamic title")}
+      context "when :force_slug_update is false" do
+        it "does not change slug" do
+          expect { dynamic_flexible.update_attribute(:title, "another title")}.to_not change{ dynamic_flexible.slug}
+        end
+      end
+      context "when :force_slug_update is true" do
+        it "changes slug" do
+          expect { dynamic_flexible.update_attributes(:title => "another title", :force_slug_update => true)}
+            .to change{ dynamic_flexible.slug}
+        end
+      end
+    end
 
     context "when slugged field contains non-ASCII characters" do
       it "slugs Cyrillic characters" do
@@ -348,6 +363,25 @@ module Mongoid
         comic_book.slug.should_not eql(book.slug)
       end
     end
+    
+    context "when :slug_with_id is true" do
+      let!(:flexible) { Flexible.create(:title => "flexible") }
+      it "doesn't try to find duplicates" do
+        flexible.should_not_receive(:slug_scope)
+        flexible.send(:generate_slug!)
+      end
+      context "building slug through field" do
+        it "prepends id to slug" do
+          flexible.slug.should == [flexible.id,flexible.title].join("-")
+        end
+      end
+      context "building sluc through proc" do
+        let!(:dynamic_flexible) { DynamicFlexible.create(:title => "flexible") }
+        it "prepends id to slug" do
+          dynamic_flexible.slug.should == [dynamic_flexible.id, "dynamic", dynamic_flexible.title].join("-")
+        end
+      end
+    end
 
     describe ".find_by_slug" do
       let!(:book) { Book.create(:title => "A Thousand Plateaus") }
@@ -358,6 +392,28 @@ module Mongoid
 
       it "returns the document if it is found" do
         Book.find_by_slug(book.slug).should == book
+      end
+      context "when object uses BSON::ObjectId in slug" do
+        let!(:flexible) { Flexible.create(:title => "This can be found by id")}
+        context "when document can be found by slug" do
+          it "retuns document" do
+            Flexible.find_by_slug(flexible.slug).should eq(flexible)
+          end
+        end
+        context "when object cannot be found by slug, but is found by id" do
+          it "raises error with found document" do
+            begin
+              Flexible.find_by_slug(flexible.id)
+            rescue => e
+              e.record.should eq(flexible)
+            end
+          end
+        end
+        context "when object cannot be found by slug or id" do
+          it "retuns nil" do
+            Flexible.find_by_slug("Cannot be found").should be_nil
+          end
+        end
       end
     end
 

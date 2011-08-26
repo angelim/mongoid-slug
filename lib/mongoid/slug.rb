@@ -15,10 +15,60 @@ module Mongoid #:nodoc:
   #    end
   #
   module Slug
+    
+    # Error that can be used to redirect requests made to URL with id match
+    # and slug mismatch. This can only be issued if slug_with_id is selected
+    # Stores a slugged record, to which the request will be redirected
+    # using the correct slug.
+    # 
+    #     class ApplicationController < ActionController::Base
+    #       rescue_from Mongoid::Slug::FullSlugNotFound do |exception|
+    #         redirect_to entry_path(exception.record)
+    #       end 
+    #     ...
+    # 
+    class FullSlugNotFound < StandardError
+      attr_reader :record
+      def initialize(record)
+        @record = record
+        super
+      end
+    end
     extend ActiveSupport::Concern
 
     included do
-      cattr_accessor :slug_builder, :slugged_fields, :slug_name, :slug_scope
+      cattr_accessor :slug_builder, :slugged_fields, :slug_name, :slug_scope, :slug_with_id
+      
+      # force_slug_update == true` will force slug revaluation when object is updated.
+      # This is useful when defining slug through block with no fields in inherited classes
+      # 
+      # == Use case with class inheritance
+      # 
+      #   class Book
+      #     include Mongoid::Document
+      #     field :title
+      #     slug do |doc|
+      #       to_slug
+      #     end
+      # 
+      #     def to_slug
+      #       title
+      #     end
+      #   end
+      # 
+      #   class ComicBook < Book
+      #     field :hero
+      #     def to_slug
+      #       super || hero
+      #     end
+      #   end  
+      # 
+      # When hero is updated and record doesn't have a title, the slug should be updated.
+      # To do so, one could set `force_slug_update` to true.
+      # 
+      #   comic_book.update_attributes(:force_slug_update => true, :hero => "Batman")
+      
+      attr_accessor :force_slug_update
     end
 
     module ClassMethods
@@ -44,6 +94,12 @@ module Mongoid #:nodoc:
       # documents to avoid the (very unlikely) race condition that would ensue
       # if two documents with identical slugs were to be saved simultaneously.
       #
+      # * `:slug_with_id`, which specifies if slug should use BSON::ObjectId.
+      # Usefull to allow slug changes without breaking previous linked URLs.
+      # Can be used to redirect users making requests with outdated slugs to
+      # the correct URL. It's a good practice to preserve already linked Urls
+      # in Search Engines. Can receive `true` or `false`
+      # 
       # Alternatively, this method can be given a block to build a custom slug
       # out of the specified fields.
       #
@@ -66,6 +122,7 @@ module Mongoid #:nodoc:
         self.slug_scope     = options[:scope]
         self.slug_name      = options[:as] || :slug
         self.slugged_fields = fields.map(&:to_s)
+        self.slug_with_id   = options[:slug_with_id]
 
         self.slug_builder =
           if block_given?
@@ -91,9 +148,28 @@ module Mongoid #:nodoc:
         # Build a finder based on the slug name.
         #
         # Defaults to `find_by_slug`.
+        # If slug_with_id is set to `true` the fiding flow goes
+        # as follows:
+        # 1. tries to find a record with slug field that matches slug argument
+        # 2. if not found, tries to extract BSON::ObjectId string from slug argument
+        #   and tries to find record with id.
+        # 3. if record is found, raises an FullSlugNotFound error, so application
+        #   can redirect the request properly and maintain unique urls in Search engines.
+        #   Otherwise will raise DocumentNotFound
         instance_eval <<-CODE
           def self.find_by_#{slug_name}(slug)
-            where(slug_name => slug).first
+            return unless slug.is_a? String
+            where(slug_name => slug).first || begin
+              possible_id = slug.split("-").first
+              if BSON::ObjectId.legal? possible_id
+                record = where(:_id => possible_id).first
+                if record
+                  raise(Mongoid::Slug::FullSlugNotFound.new(record))
+                else
+                  raise(Mongoid::Errors::DocumentNotFound.new(self, slug))
+                end
+              end
+            end
           end
 
           def self.find_by_#{slug_name}!(slug)
@@ -117,7 +193,14 @@ module Mongoid #:nodoc:
 
     def find_unique_slug
       # TODO: An epic method which calls for refactoring.
-      slug = slug_builder.call(self).to_url
+      
+      # BSON::ObjectIds are already unique. If using `slug_with_id`, returns
+      # first generated slug and avoid searching for duplicates.
+      if slug_with_id
+        return [id, slug_builder.call(self)].join("-").to_url
+      else
+        slug = slug_builder.call(self).to_url
+      end
 
       # Regular expression that matches slug, slug-1, slug-2, ... slug-n
       # If slug_name field was indexed, MongoDB will utilize that index to
@@ -164,9 +247,11 @@ module Mongoid #:nodoc:
     def generate_slug!
       write_attribute(slug_name, find_unique_slug)
     end
-
+    
+    # Determines whether defines slug fields have any changes
+    # or `force_slug_update` is set to true
     def slugged_fields_changed?
-      slugged_fields.any? { |f| attribute_changed?(f) }
+      slugged_fields.any? { |f| attribute_changed?(f) } || force_slug_update
     end
 
     def uniqueness_scope
