@@ -168,6 +168,8 @@ module Mongoid #:nodoc:
                 else
                   raise(Mongoid::Errors::DocumentNotFound.new(self, slug))
                 end
+              else
+                raise(Mongoid::Errors::DocumentNotFound.new(self, slug))
               end
             end
           end
