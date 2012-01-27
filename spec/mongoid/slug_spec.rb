@@ -411,7 +411,7 @@ module Mongoid
         end
         context "when object cannot be found by slug or id" do
           it "retuns nil" do
-            Flexible.find_by_slug("Cannot be found").should be_nil
+            expect {Flexible.find_by_slug("Cannot be found")}.to raise_error(Mongoid::Errors::DocumentNotFound)
           end
         end
       end
